@@ -10,37 +10,11 @@ from typing import Any
 import httpx
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile, status
-from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from pydantic import BaseModel, Field
 
 load_dotenv()
-
-OPENROUTER_TRANSCRIPTIONS_URL = "https://openrouter.ai/api/v1/audio/transcriptions"
-DEFAULT_MODEL = os.getenv("DEFAULT_MODEL", "qwen/qwen3-asr-flash-2026-02-10")
-DEFAULT_TIMEOUT_SECONDS = float(os.getenv("OPENROUTER_TIMEOUT_SECONDS", "60"))
-MAX_AUDIO_MB = int(os.getenv("MAX_AUDIO_MB", "25"))
-MAX_AUDIO_BYTES = MAX_AUDIO_MB * 1024 * 1024
-
-SUPPORTED_FORMATS: dict[str, str] = {
-    ".wav": "wav",
-    ".mp3": "mp3",
-    ".m4a": "m4a",
-    ".webm": "webm",
-    ".flac": "flac",
-    ".ogg": "ogg",
-}
-
-TEXT_RESPONSE_FORMATS = {"text"}
-JSON_RESPONSE_FORMATS = {"json", "verbose_json", None, ""}
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(name)s %(message)s",
-)
-logger = logging.getLogger("openrouter-stt-proxy")
-
-app = FastAPI(title="OpenRouter STT Proxy", version="1.0.0")
-bearer_scheme = HTTPBearer(auto_error=False)
 
 
 def get_required_env(name: str) -> str:
@@ -55,6 +29,111 @@ def get_required_env(name: str) -> str:
 
 def get_optional_env(name: str) -> str:
     return os.getenv(name, "").strip()
+
+
+def get_env_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None or not value.strip():
+        return default
+
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
+def get_env_int(name: str, default: int) -> int:
+    value = os.getenv(name)
+    if value is None or not value.strip():
+        return default
+
+    try:
+        return int(value.strip())
+    except ValueError:
+        return default
+
+
+def get_env_float(name: str, default: float) -> float:
+    value = os.getenv(name)
+    if value is None or not value.strip():
+        return default
+
+    try:
+        return float(value.strip())
+    except ValueError:
+        return default
+
+
+def normalize_cleanup_mode(mode: str) -> str:
+    normalized = mode.strip().lower()
+    if normalized in {"chat", "formal", "punctuation"}:
+        return normalized
+    return "chat"
+
+
+OPENROUTER_TRANSCRIPTIONS_URL = "https://openrouter.ai/api/v1/audio/transcriptions"
+OPENROUTER_CHAT_COMPLETIONS_URL = "https://openrouter.ai/api/v1/chat/completions"
+
+DEFAULT_STT_MODEL = get_optional_env("DEFAULT_MODEL") or "qwen/qwen3-asr-flash-2026-02-10"
+STT_TIMEOUT_SECONDS = get_env_float("OPENROUTER_TIMEOUT_SECONDS", 60.0)
+MAX_AUDIO_MB = get_env_int("MAX_AUDIO_MB", 25)
+MAX_AUDIO_BYTES = MAX_AUDIO_MB * 1024 * 1024
+
+ENABLE_CLEANUP = get_env_bool("ENABLE_CLEANUP", True)
+CLEANUP_MODEL = get_optional_env("CLEANUP_MODEL") or "deepseek/deepseek-v4-flash"
+CLEANUP_TEMPERATURE = get_env_float("CLEANUP_TEMPERATURE", 0.1)
+CLEANUP_TIMEOUT_SECONDS = get_env_float("CLEANUP_TIMEOUT_SECONDS", 60.0)
+CLEANUP_ON_ERROR = (get_optional_env("CLEANUP_ON_ERROR") or "raw").strip().lower()
+CLEANUP_MIN_CHARS = get_env_int("CLEANUP_MIN_CHARS", 20)
+CLEANUP_MAX_INPUT_CHARS = get_env_int("CLEANUP_MAX_INPUT_CHARS", 12000)
+CLEANUP_MODE = normalize_cleanup_mode(get_optional_env("CLEANUP_MODE") or "chat")
+DEBUG_ENDPOINTS = get_env_bool("DEBUG_ENDPOINTS", False)
+
+SUPPORTED_FORMATS: dict[str, str] = {
+    ".wav": "wav",
+    ".mp3": "mp3",
+    ".m4a": "m4a",
+    ".webm": "webm",
+    ".flac": "flac",
+    ".ogg": "ogg",
+}
+
+ALLOWED_RESPONSE_FORMATS = {"text", "json", "verbose_json", "", None}
+LOCAL_CLIENT_HOSTS = {"127.0.0.1", "::1", "localhost"}
+TEXT_PREVIEW_CHARS = 120
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s %(message)s",
+)
+logger = logging.getLogger("openrouter-stt-proxy")
+
+app = FastAPI(title="OpenRouter STT Proxy", version="1.1.0")
+bearer_scheme = HTTPBearer(auto_error=False)
+
+
+class DebugCleanupRequest(BaseModel):
+    text: str = Field(min_length=1)
+    language: str | None = None
+
+
+def build_openrouter_headers() -> dict[str, str]:
+    api_key = get_required_env("OPENROUTER_API_KEY")
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+
+    site_url = get_optional_env("OPENROUTER_SITE_URL")
+    app_name = get_optional_env("OPENROUTER_APP_NAME")
+    if site_url:
+        headers["HTTP-Referer"] = site_url
+    if app_name:
+        headers["X-Title"] = app_name
+
+    return headers
 
 
 def resolve_audio_format(filename: str | None) -> str:
@@ -78,56 +157,29 @@ def resolve_audio_format(filename: str | None) -> str:
     return audio_format
 
 
-def build_openrouter_headers() -> dict[str, str]:
-    api_key = get_required_env("OPENROUTER_API_KEY")
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    }
-
-    site_url = get_optional_env("OPENROUTER_SITE_URL")
-    app_name = get_optional_env("OPENROUTER_APP_NAME")
-    if site_url:
-        headers["HTTP-Referer"] = site_url
-    if app_name:
-        headers["X-Title"] = app_name
-
-    return headers
+def parse_upstream_payload(response: httpx.Response) -> Any:
+    content_type = response.headers.get("content-type", "")
+    if "application/json" in content_type.lower():
+        return response.json()
+    return response.text
 
 
-def extract_text(payload: Any) -> str | None:
-    if isinstance(payload, dict):
-        text = payload.get("text")
-        if isinstance(text, str) and text.strip():
-            return text
-
-        data = payload.get("data")
-        if isinstance(data, dict):
-            nested_text = data.get("text")
-            if isinstance(nested_text, str) and nested_text.strip():
-                return nested_text
-
-        choices = payload.get("choices")
-        if isinstance(choices, list):
-            for choice in choices:
-                if not isinstance(choice, dict):
-                    continue
-                candidate = choice.get("text")
-                if isinstance(candidate, str) and candidate.strip():
-                    return candidate
-
-                message = choice.get("message")
-                if isinstance(message, dict):
-                    content = message.get("content")
-                    if isinstance(content, str) and content.strip():
-                        return content
-    elif isinstance(payload, str) and payload.strip():
-        return payload
-
-    return None
+def normalize_response_format(response_format: str | None) -> str:
+    normalized = (response_format or "").strip().lower()
+    if normalized not in ALLOWED_RESPONSE_FORMATS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Unsupported response_format. Use one of: json, verbose_json, text.",
+        )
+    return normalized or "json"
 
 
-def build_openrouter_payload(
+def truncate_text_preview(text: str) -> str:
+    preview = text[:TEXT_PREVIEW_CHARS].replace("\r", " ").replace("\n", " ")
+    return preview.strip()
+
+
+def build_stt_payload(
     *,
     model: str,
     audio_base64: str,
@@ -160,6 +212,132 @@ def build_openrouter_payload(
     return payload
 
 
+def extract_text_from_stt_response(payload: Any) -> str | None:
+    if isinstance(payload, dict):
+        text = payload.get("text")
+        if isinstance(text, str) and text.strip():
+            return text.strip()
+
+        data = payload.get("data")
+        if isinstance(data, dict):
+            nested_text = data.get("text")
+            if isinstance(nested_text, str) and nested_text.strip():
+                return nested_text.strip()
+
+        choices = payload.get("choices")
+        if isinstance(choices, list):
+            for choice in choices:
+                if isinstance(choice, dict):
+                    candidate = choice.get("text")
+                    if isinstance(candidate, str) and candidate.strip():
+                        return candidate.strip()
+
+    if isinstance(payload, str) and payload.strip():
+        return payload.strip()
+
+    return None
+
+
+def extract_text_from_chat_response(payload: Any) -> str | None:
+    if isinstance(payload, dict):
+        choices = payload.get("choices")
+        if isinstance(choices, list):
+            for choice in choices:
+                if not isinstance(choice, dict):
+                    continue
+
+                message = choice.get("message")
+                if isinstance(message, dict):
+                    content = message.get("content")
+                    if isinstance(content, str) and content.strip():
+                        return content.strip()
+                    if isinstance(content, list):
+                        text_parts: list[str] = []
+                        for item in content:
+                            if isinstance(item, dict) and item.get("type") == "text":
+                                part_text = item.get("text")
+                                if isinstance(part_text, str) and part_text.strip():
+                                    text_parts.append(part_text.strip())
+                        if text_parts:
+                            return "\n".join(text_parts).strip()
+
+                direct_text = choice.get("text")
+                if isinstance(direct_text, str) and direct_text.strip():
+                    return direct_text.strip()
+
+        direct_text = payload.get("text")
+        if isinstance(direct_text, str) and direct_text.strip():
+            return direct_text.strip()
+
+    if isinstance(payload, str) and payload.strip():
+        return payload.strip()
+
+    return None
+
+
+def build_cleanup_prompt(mode: str, raw_text: str, language: str | None = None) -> str:
+    del raw_text
+
+    base_prompt = """Ты редактор русской диктовки.
+
+Твоя задача — превратить сырой распознанный голосовой текст в аккуратный естественный письменный текст.
+
+Правила:
+- Не добавляй новых фактов.
+- Не меняй смысл.
+- Не сокращай агрессивно.
+- Исправляй пунктуацию, регистр, грамматику и очевидные ошибки распознавания.
+- Убирай явные повторы, оговорки и слова-паразиты, если они не нужны по смыслу.
+- Сохраняй живой естественный стиль автора.
+- Не делай текст слишком официальным.
+- Если текст длинный, разбей его на абзацы.
+- Если текст похож на сообщение в чат, оформи его как нормальное сообщение.
+- Не добавляй комментариев, пояснений, заголовков или Markdown.
+- Верни только готовый очищенный текст."""
+
+    mode_prompt = {
+        "chat": "Оформи текст как естественное сообщение в живом, разговорном тоне без лишней официальности.",
+        "formal": "Сделай текст более деловым и грамотным, но не меняй смысл и не добавляй официальной тяжеловесности.",
+        "punctuation": "Сосредоточься почти только на пунктуации, регистре, грамматике и явных ASR-ошибках. Перефразируй как можно меньше.",
+    }[normalize_cleanup_mode(mode)]
+
+    language_hint = ""
+    if language and language.strip().lower() not in {"ru", "rus", "russian"}:
+        language_hint = (
+            f"\nОсновной язык текста: {language.strip()}. "
+            "Сохраняй исходный язык автора и исправляй только оформление и очевидные ошибки распознавания."
+        )
+
+    return f"{base_prompt}\n\n{mode_prompt}{language_hint}"
+
+
+def build_cleanup_messages(mode: str, raw_text: str, language: str | None = None) -> list[dict[str, str]]:
+    return [
+        {
+            "role": "system",
+            "content": build_cleanup_prompt(mode, raw_text, language=language),
+        },
+        {
+            "role": "user",
+            "content": f"Сырой текст диктовки:\n{raw_text}",
+        },
+    ]
+
+
+def handle_cleanup_failure(
+    raw_text: str,
+    message: str,
+    *,
+    status_code: int,
+    exc: Exception | None = None,
+) -> str:
+    if CLEANUP_ON_ERROR != "fail":
+        logger.warning("%s Returning raw transcript because CLEANUP_ON_ERROR=raw.", message)
+        return raw_text
+
+    raise HTTPException(status_code=status_code, detail=message) from exc
+
+
 async def verify_local_proxy_auth(
     credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
 ) -> None:
@@ -179,12 +357,206 @@ async def verify_local_proxy_auth(
         )
 
 
-@app.get("/health", dependencies=[Depends(verify_local_proxy_auth)])
-async def health() -> dict[str, str]:
+async def verify_debug_endpoint_access(request: Request) -> None:
+    if DEBUG_ENDPOINTS:
+        return
+
+    client_host = request.client.host if request.client else ""
+    if client_host not in LOCAL_CLIENT_HOSTS:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Debug cleanup endpoint is available only from localhost unless DEBUG_ENDPOINTS=true.",
+        )
+
+
+async def transcribe_with_openrouter(
+    *,
+    model: str,
+    audio_bytes: bytes,
+    audio_format: str,
+    language: str | None,
+    prompt: str | None,
+    temperature: float | None,
+) -> tuple[str, int, Any]:
+    audio_base64 = base64.b64encode(audio_bytes).decode("ascii")
+    payload = build_stt_payload(
+        model=model,
+        audio_base64=audio_base64,
+        audio_format=audio_format,
+        language=language,
+        prompt=prompt,
+        temperature=temperature,
+    )
+
+    try:
+        timeout = httpx.Timeout(STT_TIMEOUT_SECONDS)
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.post(
+                OPENROUTER_TRANSCRIPTIONS_URL,
+                headers=build_openrouter_headers(),
+                json=payload,
+            )
+    except httpx.TimeoutException as exc:
+        raise HTTPException(
+            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+            detail=(
+                "Timed out while waiting for OpenRouter STT. "
+                "Try a smaller file or increase OPENROUTER_TIMEOUT_SECONDS."
+            ),
+        ) from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to reach OpenRouter STT: {exc}",
+        ) from exc
+
+    upstream_payload = parse_upstream_payload(response)
+
+    if response.status_code in {status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN}:
+        raise HTTPException(
+            status_code=response.status_code,
+            detail={
+                "message": "OpenRouter STT authorization failed. Check OPENROUTER_API_KEY.",
+                "upstream": upstream_payload,
+            },
+        )
+
+    if response.status_code == status.HTTP_400_BAD_REQUEST:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "message": "OpenRouter STT rejected the request.",
+                "upstream": upstream_payload,
+            },
+        )
+
+    if response.is_error:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={
+                "message": f"OpenRouter STT request failed with status {response.status_code}.",
+                "upstream": upstream_payload,
+            },
+        )
+
+    raw_text = extract_text_from_stt_response(upstream_payload)
+    if not raw_text:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={
+                "message": "OpenRouter STT response did not contain transcription text.",
+                "upstream": upstream_payload,
+            },
+        )
+
+    return raw_text, response.status_code, upstream_payload
+
+
+async def cleanup_text(raw_text: str, language: str | None = None) -> str:
+    if not ENABLE_CLEANUP:
+        logger.info(
+            "Cleanup response status=skipped reason=disabled cleanup_enabled=%s cleanup_model=%s cleanup_mode=%s",
+            ENABLE_CLEANUP,
+            CLEANUP_MODEL,
+            CLEANUP_MODE,
+        )
+        return raw_text
+
+    normalized_text = raw_text.strip()
+    if not normalized_text:
+        logger.info("Cleanup response status=skipped reason=empty_text")
+        return raw_text
+
+    if len(normalized_text) < CLEANUP_MIN_CHARS:
+        logger.info(
+            "Cleanup response status=skipped reason=text_too_short raw_text_length=%s cleanup_min_chars=%s",
+            len(normalized_text),
+            CLEANUP_MIN_CHARS,
+        )
+        return raw_text
+
+    if len(normalized_text) > CLEANUP_MAX_INPUT_CHARS:
+        logger.info(
+            "Cleanup response status=skipped reason=text_too_long raw_text_length=%s cleanup_max_input_chars=%s",
+            len(normalized_text),
+            CLEANUP_MAX_INPUT_CHARS,
+        )
+        return raw_text
+
+    messages = build_cleanup_messages(CLEANUP_MODE, normalized_text, language=language)
+    payload: dict[str, Any] = {
+        "model": CLEANUP_MODEL,
+        "messages": messages,
+        "temperature": CLEANUP_TEMPERATURE,
+    }
+
+    logger.debug("Cleanup raw preview=%s", truncate_text_preview(normalized_text))
+
+    try:
+        timeout = httpx.Timeout(CLEANUP_TIMEOUT_SECONDS)
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.post(
+                OPENROUTER_CHAT_COMPLETIONS_URL,
+                headers=build_openrouter_headers(),
+                json=payload,
+            )
+    except httpx.TimeoutException as exc:
+        return handle_cleanup_failure(
+            raw_text,
+            "Cleanup request timed out while waiting for OpenRouter Chat Completions.",
+            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+            exc=exc,
+        )
+    except httpx.HTTPError as exc:
+        return handle_cleanup_failure(
+            raw_text,
+            f"Failed to reach OpenRouter cleanup endpoint: {exc}",
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            exc=exc,
+        )
+
+    cleanup_payload = parse_upstream_payload(response)
+    logger.info("Cleanup response status=%s", response.status_code)
+
+    if response.status_code in {status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN}:
+        return handle_cleanup_failure(
+            raw_text,
+            "OpenRouter cleanup authorization failed. Check OPENROUTER_API_KEY.",
+            status_code=response.status_code,
+        )
+
+    if response.status_code == status.HTTP_400_BAD_REQUEST:
+        return handle_cleanup_failure(
+            raw_text,
+            "OpenRouter cleanup rejected the request.",
+            status_code=status.HTTP_400_BAD_REQUEST,
+        )
+
+    if response.is_error:
+        return handle_cleanup_failure(
+            raw_text,
+            f"OpenRouter cleanup request failed with status {response.status_code}.",
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+    cleaned_text = extract_text_from_chat_response(cleanup_payload)
+    if not cleaned_text:
+        logger.warning("Cleanup returned empty text. Falling back to raw transcript.")
+        return raw_text
+
+    logger.debug("Cleanup cleaned preview=%s", truncate_text_preview(cleaned_text))
+    return cleaned_text
+
+
+@app.get("/health")
+async def health() -> dict[str, Any]:
     return {
         "status": "ok",
         "provider": "openrouter",
-        "default_model": DEFAULT_MODEL,
+        "default_stt_model": DEFAULT_STT_MODEL,
+        "cleanup_enabled": ENABLE_CLEANUP,
+        "cleanup_model": CLEANUP_MODEL,
+        "cleanup_mode": CLEANUP_MODE,
     }
 
 
@@ -194,12 +566,29 @@ async def list_models() -> dict[str, Any]:
         "object": "list",
         "data": [
             {
-                "id": DEFAULT_MODEL,
+                "id": DEFAULT_STT_MODEL,
                 "object": "model",
                 "owned_by": "openrouter",
-            }
+                "type": "speech-to-text",
+            },
+            {
+                "id": CLEANUP_MODEL,
+                "object": "model",
+                "owned_by": "openrouter",
+                "type": "chat-cleanup",
+            },
         ],
     }
+
+
+@app.post(
+    "/debug/cleanup",
+    dependencies=[Depends(verify_local_proxy_auth), Depends(verify_debug_endpoint_access)],
+    response_model=None,
+)
+async def debug_cleanup(payload: DebugCleanupRequest) -> dict[str, str]:
+    cleaned_text = await cleanup_text(payload.text, language=payload.language)
+    return {"text": cleaned_text}
 
 
 @app.post(
@@ -210,28 +599,23 @@ async def list_models() -> dict[str, Any]:
 async def create_transcription(
     request: Request,
     file: UploadFile = File(...),
-    model: str = Form(DEFAULT_MODEL),
+    model: str = Form(DEFAULT_STT_MODEL),
     language: str | None = Form(default=None),
     prompt: str | None = Form(default=None),
     temperature: float | None = Form(default=None),
     response_format: str | None = Form(default=None),
-) -> JSONResponse | PlainTextResponse:
+) -> JSONResponse:
     start = time.perf_counter()
-    upstream_status = "not_sent"
+    selected_model = model.strip() or DEFAULT_STT_MODEL
+    normalized_language = language.strip() if language else None
+    normalized_prompt = prompt.strip() if prompt else None
+    raw_text = ""
+    cleaned_text = ""
     file_bytes = b""
+    stt_response_status = "not_sent"
 
     try:
-        normalized_format = (response_format or "").strip().lower() or "json"
-        selected_model = model.strip() or DEFAULT_MODEL
-        if normalized_format not in TEXT_RESPONSE_FORMATS and normalized_format not in JSON_RESPONSE_FORMATS:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=(
-                    "Unsupported response_format. "
-                    "Use one of: json, verbose_json, text."
-                ),
-            )
-
+        normalize_response_format(response_format)
         audio_format = resolve_audio_format(file.filename)
         file_bytes = await file.read()
         file_size = len(file_bytes)
@@ -248,107 +632,47 @@ async def create_transcription(
             )
 
         logger.info(
-            "Incoming transcription filename=%s size_bytes=%s model=%s client=%s",
+            "STT request started filename=%s file_size_bytes=%s stt_model=%s client=%s",
             file.filename,
             file_size,
             selected_model,
             request.client.host if request.client else "unknown",
         )
 
-        audio_base64 = base64.b64encode(file_bytes).decode("ascii")
-        payload = build_openrouter_payload(
+        raw_text, stt_status_code, _ = await transcribe_with_openrouter(
             model=selected_model,
-            audio_base64=audio_base64,
+            audio_bytes=file_bytes,
             audio_format=audio_format,
-            language=language.strip() if language else None,
-            prompt=prompt.strip() if prompt else None,
+            language=normalized_language,
+            prompt=normalized_prompt,
             temperature=temperature,
         )
+        stt_response_status = str(stt_status_code)
 
-        timeout = httpx.Timeout(DEFAULT_TIMEOUT_SECONDS)
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            response = await client.post(
-                OPENROUTER_TRANSCRIPTIONS_URL,
-                headers=build_openrouter_headers(),
-                json=payload,
-            )
+        logger.info(
+            "STT response status=%s raw_text_length=%s cleanup_enabled=%s cleanup_model=%s cleanup_mode=%s",
+            stt_response_status,
+            len(raw_text),
+            ENABLE_CLEANUP,
+            CLEANUP_MODEL,
+            CLEANUP_MODE,
+        )
+        logger.debug("STT raw preview=%s", truncate_text_preview(raw_text))
 
-        upstream_status = str(response.status_code)
-        logger.info("OpenRouter response status=%s", response.status_code)
+        cleaned_text = await cleanup_text(raw_text, language=normalized_language)
+        logger.info("Cleaned text length=%s", len(cleaned_text))
 
-        content_type = response.headers.get("content-type", "")
-        if "application/json" in content_type.lower():
-            upstream_payload: Any = response.json()
-        else:
-            upstream_payload = response.text
-
-        if response.status_code in {status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN}:
-            raise HTTPException(
-                status_code=response.status_code,
-                detail={
-                    "message": "OpenRouter authorization failed. Check OPENROUTER_API_KEY.",
-                    "upstream": upstream_payload,
-                },
-            )
-
-        if response.status_code == status.HTTP_400_BAD_REQUEST:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail={
-                    "message": "OpenRouter rejected the request.",
-                    "upstream": upstream_payload,
-                },
-            )
-
-        if response.is_error:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail={
-                    "message": f"OpenRouter request failed with status {response.status_code}.",
-                    "upstream": upstream_payload,
-                },
-            )
-
-        text = extract_text(upstream_payload)
-        if not text:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail={
-                    "message": "OpenRouter response did not contain transcription text.",
-                    "upstream": upstream_payload,
-                },
-            )
-
-        if normalized_format in TEXT_RESPONSE_FORMATS:
-            return PlainTextResponse(content=text)
-
-        if isinstance(upstream_payload, dict) and isinstance(upstream_payload.get("text"), str):
-            return JSONResponse(content=upstream_payload)
-
-        return JSONResponse(content={"text": text})
-    except httpx.TimeoutException as exc:
-        upstream_status = "timeout"
-        raise HTTPException(
-            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
-            detail=(
-                "Timed out while waiting for OpenRouter. "
-                "Try a smaller file or increase OPENROUTER_TIMEOUT_SECONDS."
-            ),
-        ) from exc
-    except httpx.HTTPError as exc:
-        upstream_status = "http_error"
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to reach OpenRouter: {exc}",
-        ) from exc
+        return JSONResponse(content={"text": cleaned_text})
     finally:
         duration_ms = round((time.perf_counter() - start) * 1000, 2)
         logger.info(
-            "Completed transcription filename=%s size_bytes=%s model=%s upstream_status=%s duration_ms=%s",
+            "Transcription completed filename=%s file_size_bytes=%s stt_model=%s stt_response_status=%s raw_text_length=%s cleaned_text_length=%s total_duration_ms=%s",
             file.filename,
             len(file_bytes),
-            selected_model if "selected_model" in locals() else model,
-            upstream_status,
+            selected_model,
+            stt_response_status,
+            len(raw_text),
+            len(cleaned_text),
             duration_ms,
         )
         await file.close()
