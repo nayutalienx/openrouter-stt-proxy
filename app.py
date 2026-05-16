@@ -75,12 +75,15 @@ def normalize_cleanup_mode(mode: str) -> str:
 
 OPENROUTER_TRANSCRIPTIONS_URL = "https://openrouter.ai/api/v1/audio/transcriptions"
 OPENROUTER_CHAT_COMPLETIONS_URL = "https://openrouter.ai/api/v1/chat/completions"
+DEFAULT_DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 
 DEFAULT_STT_MODEL = get_optional_env("DEFAULT_MODEL") or "qwen/qwen3-asr-flash-2026-02-10"
 STT_TIMEOUT_SECONDS = get_env_float("OPENROUTER_TIMEOUT_SECONDS", 60.0)
 MAX_AUDIO_MB = get_env_int("MAX_AUDIO_MB", 25)
 MAX_AUDIO_BYTES = MAX_AUDIO_MB * 1024 * 1024
 
+cleanup_provider_value = (get_optional_env("CLEANUP_PROVIDER") or "openrouter").strip().lower()
+CLEANUP_PROVIDER = cleanup_provider_value if cleanup_provider_value in {"openrouter", "deepseek"} else "openrouter"
 ENABLE_CLEANUP = get_env_bool("ENABLE_CLEANUP", True)
 CLEANUP_MODEL = get_optional_env("CLEANUP_MODEL") or "deepseek/deepseek-v4-flash"
 CLEANUP_TEMPERATURE = get_env_float("CLEANUP_TEMPERATURE", 0.1)
@@ -90,6 +93,7 @@ CLEANUP_MIN_CHARS = get_env_int("CLEANUP_MIN_CHARS", 20)
 CLEANUP_MAX_INPUT_CHARS = get_env_int("CLEANUP_MAX_INPUT_CHARS", 12000)
 CLEANUP_MODE = normalize_cleanup_mode(get_optional_env("CLEANUP_MODE") or "chat")
 DEBUG_ENDPOINTS = get_env_bool("DEBUG_ENDPOINTS", False)
+DEEPSEEK_BASE_URL = get_optional_env("DEEPSEEK_BASE_URL") or DEFAULT_DEEPSEEK_BASE_URL
 
 SUPPORTED_FORMATS: dict[str, str] = {
     ".wav": "wav",
@@ -134,6 +138,32 @@ def build_openrouter_headers() -> dict[str, str]:
         headers["X-Title"] = app_name
 
     return headers
+
+
+def build_deepseek_headers() -> dict[str, str]:
+    api_key = get_required_env("DEEPSEEK_API_KEY")
+    return {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+
+
+def build_cleanup_headers() -> dict[str, str]:
+    if CLEANUP_PROVIDER == "deepseek":
+        return build_deepseek_headers()
+    return build_openrouter_headers()
+
+
+def get_cleanup_url() -> str:
+    if CLEANUP_PROVIDER == "deepseek":
+        return f"{DEEPSEEK_BASE_URL.rstrip('/')}/chat/completions"
+    return OPENROUTER_CHAT_COMPLETIONS_URL
+
+
+def get_cleanup_owned_by() -> str:
+    if CLEANUP_PROVIDER == "deepseek":
+        return "deepseek"
+    return "openrouter"
 
 
 def resolve_audio_format(filename: str | None) -> str:
@@ -455,8 +485,9 @@ async def transcribe_with_openrouter(
 async def cleanup_text(raw_text: str, language: str | None = None) -> str:
     if not ENABLE_CLEANUP:
         logger.info(
-            "Cleanup response status=skipped reason=disabled cleanup_enabled=%s cleanup_model=%s cleanup_mode=%s",
+            "Cleanup response status=skipped reason=disabled cleanup_enabled=%s cleanup_provider=%s cleanup_model=%s cleanup_mode=%s",
             ENABLE_CLEANUP,
+            CLEANUP_PROVIDER,
             CLEANUP_MODEL,
             CLEANUP_MODE,
         )
@@ -496,46 +527,56 @@ async def cleanup_text(raw_text: str, language: str | None = None) -> str:
         timeout = httpx.Timeout(CLEANUP_TIMEOUT_SECONDS)
         async with httpx.AsyncClient(timeout=timeout) as client:
             response = await client.post(
-                OPENROUTER_CHAT_COMPLETIONS_URL,
-                headers=build_openrouter_headers(),
+                get_cleanup_url(),
+                headers=build_cleanup_headers(),
                 json=payload,
             )
     except httpx.TimeoutException as exc:
         return handle_cleanup_failure(
             raw_text,
-            "Cleanup request timed out while waiting for OpenRouter Chat Completions.",
+            f"Cleanup request timed out while waiting for {CLEANUP_PROVIDER} chat completions.",
             status_code=status.HTTP_504_GATEWAY_TIMEOUT,
             exc=exc,
         )
     except httpx.HTTPError as exc:
         return handle_cleanup_failure(
             raw_text,
-            f"Failed to reach OpenRouter cleanup endpoint: {exc}",
+            f"Failed to reach {CLEANUP_PROVIDER} cleanup endpoint: {exc}",
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             exc=exc,
         )
 
     cleanup_payload = parse_upstream_payload(response)
-    logger.info("Cleanup response status=%s", response.status_code)
+    logger.info(
+        "Cleanup response status=%s cleanup_provider=%s cleanup_model=%s cleanup_mode=%s",
+        response.status_code,
+        CLEANUP_PROVIDER,
+        CLEANUP_MODEL,
+        CLEANUP_MODE,
+    )
 
     if response.status_code in {status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN}:
         return handle_cleanup_failure(
             raw_text,
-            "OpenRouter cleanup authorization failed. Check OPENROUTER_API_KEY.",
+            (
+                "DeepSeek cleanup authorization failed. Check DEEPSEEK_API_KEY."
+                if CLEANUP_PROVIDER == "deepseek"
+                else "OpenRouter cleanup authorization failed. Check OPENROUTER_API_KEY."
+            ),
             status_code=response.status_code,
         )
 
     if response.status_code == status.HTTP_400_BAD_REQUEST:
         return handle_cleanup_failure(
             raw_text,
-            "OpenRouter cleanup rejected the request.",
+            f"{CLEANUP_PROVIDER.capitalize()} cleanup rejected the request.",
             status_code=status.HTTP_400_BAD_REQUEST,
         )
 
     if response.is_error:
         return handle_cleanup_failure(
             raw_text,
-            f"OpenRouter cleanup request failed with status {response.status_code}.",
+            f"{CLEANUP_PROVIDER.capitalize()} cleanup request failed with status {response.status_code}.",
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         )
 
@@ -555,6 +596,7 @@ async def health() -> dict[str, Any]:
         "provider": "openrouter",
         "default_stt_model": DEFAULT_STT_MODEL,
         "cleanup_enabled": ENABLE_CLEANUP,
+        "cleanup_provider": CLEANUP_PROVIDER,
         "cleanup_model": CLEANUP_MODEL,
         "cleanup_mode": CLEANUP_MODE,
     }
@@ -574,7 +616,7 @@ async def list_models() -> dict[str, Any]:
             {
                 "id": CLEANUP_MODEL,
                 "object": "model",
-                "owned_by": "openrouter",
+                "owned_by": get_cleanup_owned_by(),
                 "type": "chat-cleanup",
             },
         ],
@@ -650,10 +692,11 @@ async def create_transcription(
         stt_response_status = str(stt_status_code)
 
         logger.info(
-            "STT response status=%s raw_text_length=%s cleanup_enabled=%s cleanup_model=%s cleanup_mode=%s",
+            "STT response status=%s raw_text_length=%s cleanup_enabled=%s cleanup_provider=%s cleanup_model=%s cleanup_mode=%s",
             stt_response_status,
             len(raw_text),
             ENABLE_CLEANUP,
+            CLEANUP_PROVIDER,
             CLEANUP_MODEL,
             CLEANUP_MODE,
         )

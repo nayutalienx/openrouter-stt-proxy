@@ -75,6 +75,7 @@ OPENROUTER_SITE_URL=http://localhost
 DEFAULT_MODEL=qwen/qwen3-asr-flash-2026-02-10
 MAX_AUDIO_MB=25
 OPENROUTER_TIMEOUT_SECONDS=60
+CLEANUP_PROVIDER=openrouter
 ENABLE_CLEANUP=true
 CLEANUP_MODEL=deepseek/deepseek-v4-flash
 CLEANUP_TEMPERATURE=0.1
@@ -83,6 +84,8 @@ CLEANUP_ON_ERROR=raw
 CLEANUP_MIN_CHARS=20
 CLEANUP_MAX_INPUT_CHARS=12000
 CLEANUP_MODE=chat
+DEEPSEEK_API_KEY=
+DEEPSEEK_BASE_URL=https://api.deepseek.com
 DEBUG_ENDPOINTS=false
 LOCAL_PROXY_API_KEY=
 ```
@@ -95,14 +98,17 @@ LOCAL_PROXY_API_KEY=
 - `DEFAULT_MODEL`: default STT model. Defaults to `qwen/qwen3-asr-flash-2026-02-10`.
 - `MAX_AUDIO_MB`: max accepted upload size in MB. Default is `25`.
 - `OPENROUTER_TIMEOUT_SECONDS`: upstream STT timeout. Default is `60`.
+- `CLEANUP_PROVIDER`: cleanup backend. Use `openrouter` or `deepseek`.
 - `ENABLE_CLEANUP`: enables or disables transcript cleanup. Default is `true`.
-- `CLEANUP_MODEL`: OpenRouter chat model for cleanup. Default is `deepseek/deepseek-v4-flash`.
+- `CLEANUP_MODEL`: chat model for cleanup. Examples: `deepseek/deepseek-v4-flash` on OpenRouter or `deepseek-v4-flash` on DeepSeek.
 - `CLEANUP_TEMPERATURE`: low cleanup temperature for stable editing. Default is `0.1`.
 - `CLEANUP_TIMEOUT_SECONDS`: cleanup timeout. Default is `60`.
 - `CLEANUP_ON_ERROR`: `raw` or `fail`. If `raw`, the proxy returns the raw STT transcript when cleanup fails.
 - `CLEANUP_MIN_CHARS`: skip cleanup for very short transcripts. Default is `20`.
 - `CLEANUP_MAX_INPUT_CHARS`: skip cleanup when the raw transcript is longer than this threshold. Default is `12000`.
 - `CLEANUP_MODE`: `chat`, `formal`, or `punctuation`.
+- `DEEPSEEK_API_KEY`: required only when `CLEANUP_PROVIDER=deepseek`.
+- `DEEPSEEK_BASE_URL`: defaults to `https://api.deepseek.com`.
 - `DEBUG_ENDPOINTS`: when `true`, debug endpoints are allowed beyond strict localhost-only access rules.
 - `LOCAL_PROXY_API_KEY`: optional local auth key. Leave empty to disable local auth.
 
@@ -114,7 +120,18 @@ Enable cleanup:
 
 ```env
 ENABLE_CLEANUP=true
+CLEANUP_PROVIDER=openrouter
 CLEANUP_MODEL=deepseek/deepseek-v4-flash
+```
+
+Use DeepSeek directly for cleanup:
+
+```env
+ENABLE_CLEANUP=true
+CLEANUP_PROVIDER=deepseek
+CLEANUP_MODEL=deepseek-v4-flash
+DEEPSEEK_API_KEY=your_deepseek_key
+DEEPSEEK_BASE_URL=https://api.deepseek.com
 ```
 
 Disable cleanup:
@@ -194,6 +211,7 @@ Response:
   "provider": "openrouter",
   "default_stt_model": "qwen/qwen3-asr-flash-2026-02-10",
   "cleanup_enabled": true,
+  "cleanup_provider": "openrouter",
   "cleanup_model": "deepseek/deepseek-v4-flash",
   "cleanup_mode": "chat"
 }
@@ -214,9 +232,9 @@ Response:
       "type": "speech-to-text"
     },
     {
-      "id": "deepseek/deepseek-v4-flash",
+      "id": "deepseek-v4-flash",
       "object": "model",
-      "owned_by": "openrouter",
+      "owned_by": "deepseek",
       "type": "chat-cleanup"
     }
   ]
@@ -312,7 +330,9 @@ curl -X POST http://127.0.0.1:8787/v1/audio/transcriptions ^
 - The proxy does not log the full user transcript.
 - `language` and `temperature` are forwarded to STT when provided.
 - `prompt` is forwarded only when non-empty and is sent as a Qwen provider-specific option.
-- Cleanup uses the same `OPENROUTER_API_KEY` as STT.
+- STT uses `OPENROUTER_API_KEY`.
+- Cleanup uses `OPENROUTER_API_KEY` when `CLEANUP_PROVIDER=openrouter`.
+- Cleanup uses `DEEPSEEK_API_KEY` when `CLEANUP_PROVIDER=deepseek`.
 
 ## Error handling
 
@@ -350,7 +370,9 @@ Cleanup:
 
 - Check that `OPENROUTER_API_KEY` in `.env` is correct.
 - Restart the proxy after editing `.env`.
-- Verify your OpenRouter account can access both `qwen/qwen3-asr-flash-2026-02-10` and `deepseek/deepseek-v4-flash` if cleanup is enabled.
+- Verify your OpenRouter account can access `qwen/qwen3-asr-flash-2026-02-10`.
+- If `CLEANUP_PROVIDER=openrouter`, verify OpenRouter can access your cleanup model too.
+- If `CLEANUP_PROVIDER=deepseek`, verify `DEEPSEEK_API_KEY` is correct and the model is available on your DeepSeek account.
 - If `LOCAL_PROXY_API_KEY` is set, make sure the local `Authorization: Bearer ...` header is also present.
 
 ### `400`
