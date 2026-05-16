@@ -3,7 +3,6 @@ from __future__ import annotations
 import base64
 import logging
 import os
-import re
 import time
 from pathlib import Path
 from typing import Any
@@ -84,28 +83,6 @@ def normalize_language_hint(language: str | None) -> str | None:
     if normalized in {"en", "en-us", "en-gb", "eng", "english"}:
         return "en"
     return normalized
-
-
-def detect_cleanup_language(raw_text: str, language: str | None = None) -> str:
-    normalized_language = normalize_language_hint(language)
-    if normalized_language in {"ru", "en"}:
-        return normalized_language
-
-    cyrillic_count = len(re.findall(r"[А-Яа-яЁё]", raw_text))
-    latin_count = len(re.findall(r"[A-Za-z]", raw_text))
-    total_letters = cyrillic_count + latin_count
-
-    if total_letters == 0:
-        return "multilingual"
-
-    cyrillic_ratio = cyrillic_count / total_letters
-    latin_ratio = latin_count / total_letters
-
-    if cyrillic_count >= 12 and cyrillic_ratio >= 0.85:
-        return "ru"
-    if latin_count >= 12 and latin_ratio >= 0.85:
-        return "en"
-    return "multilingual"
 
 
 OPENROUTER_TRANSCRIPTIONS_URL = "https://openrouter.ai/api/v1/audio/transcriptions"
@@ -340,60 +317,6 @@ def extract_text_from_chat_response(payload: Any) -> str | None:
     return None
 
 
-def build_russian_cleanup_prompt(mode: str) -> str:
-    base_prompt = """Ты редактор диктовки на русском языке.
-
-Твоя задача — превратить сырой распознанный голосовой текст в аккуратный естественный письменный текст.
-
-Правила:
-- Не добавляй новых фактов.
-- Не меняй смысл.
-- Не сокращай агрессивно.
-- Исправляй пунктуацию, регистр, грамматику и очевидные ошибки распознавания.
-- Убирай явные повторы, оговорки и слова-паразиты, если они не нужны по смыслу.
-- Сохраняй живой естественный стиль автора.
-- Не делай текст слишком официальным.
-- Если текст длинный, разбей его на абзацы.
-- Если текст похож на сообщение в чат, оформи его как нормальное сообщение.
-- Не добавляй комментариев, пояснений, заголовков или Markdown.
-- Верни только готовый очищенный текст."""
-
-    mode_prompt = {
-        "chat": "Оформи текст как естественное сообщение в живом, разговорном тоне без лишней официальности.",
-        "formal": "Сделай текст более деловым и грамотным, но не меняй смысл и не добавляй официальной тяжеловесности.",
-        "punctuation": "Сосредоточься почти только на пунктуации, регистре, грамматике и явных ASR-ошибках. Перефразируй как можно меньше.",
-    }[normalize_cleanup_mode(mode)]
-
-    return f"{base_prompt}\n\n{mode_prompt}"
-
-
-def build_english_cleanup_prompt(mode: str) -> str:
-    base_prompt = """You are an editor for dictated English text.
-
-Your task is to turn raw speech recognition output into clean, natural written text.
-
-Rules:
-- Do not add new facts.
-- Do not change the meaning.
-- Do not shorten the text aggressively.
-- Fix punctuation, capitalization, grammar, and obvious recognition mistakes.
-- Remove obvious repetitions, filler words, and false starts only when they are not needed for meaning.
-- Preserve the author's natural voice.
-- Do not make the text sound too formal unless asked by the mode.
-- If the text is long, split it into paragraphs when helpful.
-- If the text looks like a chat message, format it like a normal message.
-- Do not add commentary, explanations, headings, or Markdown.
-- Return only the cleaned text."""
-
-    mode_prompt = {
-        "chat": "Make the text sound like a natural message with a live, conversational tone.",
-        "formal": "Make the text more polished and businesslike without changing its meaning.",
-        "punctuation": "Focus almost only on punctuation, capitalization, grammar, and obvious ASR mistakes. Rephrase as little as possible.",
-    }[normalize_cleanup_mode(mode)]
-
-    return f"{base_prompt}\n\n{mode_prompt}"
-
-
 def build_multilingual_cleanup_prompt(mode: str, language: str | None = None) -> str:
     base_prompt = """You are an editor for dictated text.
 
@@ -433,22 +356,11 @@ Rules:
 
 
 def build_cleanup_prompt(mode: str, raw_text: str, language: str | None = None) -> str:
-    detected_language = detect_cleanup_language(raw_text, language=language)
-    if detected_language == "ru":
-        return build_russian_cleanup_prompt(mode)
-    if detected_language == "en":
-        return build_english_cleanup_prompt(mode)
+    del raw_text
     return build_multilingual_cleanup_prompt(mode, language=language)
 
 
 def build_cleanup_messages(mode: str, raw_text: str, language: str | None = None) -> list[dict[str, str]]:
-    detected_language = detect_cleanup_language(raw_text, language=language)
-    user_prefix = "Сырой текст диктовки:"
-    if detected_language == "en":
-        user_prefix = "Raw dictated text:"
-    elif detected_language == "multilingual":
-        user_prefix = "Raw dictated text:"
-
     return [
         {
             "role": "system",
@@ -456,7 +368,7 @@ def build_cleanup_messages(mode: str, raw_text: str, language: str | None = None
         },
         {
             "role": "user",
-            "content": f"{user_prefix}\n{raw_text}",
+            "content": f"Raw dictated text:\n{raw_text}",
         },
     ]
 
@@ -621,7 +533,6 @@ async def cleanup_text(raw_text: str, language: str | None = None) -> str:
         )
         return raw_text
 
-    detected_language = detect_cleanup_language(normalized_text, language=language)
     messages = build_cleanup_messages(CLEANUP_MODE, normalized_text, language=language)
     payload: dict[str, Any] = {
         "model": CLEANUP_MODEL,
@@ -656,12 +567,11 @@ async def cleanup_text(raw_text: str, language: str | None = None) -> str:
 
     cleanup_payload = parse_upstream_payload(response)
     logger.info(
-        "Cleanup response status=%s cleanup_provider=%s cleanup_model=%s cleanup_mode=%s cleanup_language=%s",
+        "Cleanup response status=%s cleanup_provider=%s cleanup_model=%s cleanup_mode=%s",
         response.status_code,
         CLEANUP_PROVIDER,
         CLEANUP_MODEL,
         CLEANUP_MODE,
-        detected_language,
     )
 
     if response.status_code in {status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN}:
