@@ -121,7 +121,8 @@ Cleanup language behavior:
 
 - `language=ru`: uses a Russian cleanup prompt
 - `language=en`: uses an English cleanup prompt
-- no `language` or mixed-language dictation: uses a multilingual-safe cleanup prompt that preserves Russian/English switching
+- no `language`: the proxy auto-detects whether the cleanup prompt should be Russian, English, or multilingual based on the raw transcript
+- mixed-language dictation: uses a multilingual-safe cleanup prompt that preserves Russian/English switching
 
 For mixed Russian/English dictation, it is usually better to leave `language` unset so STT and cleanup can preserve the language mix naturally.
 
@@ -343,6 +344,7 @@ curl -X POST http://127.0.0.1:8787/v1/audio/transcriptions ^
 - Cleanup uses `OPENROUTER_API_KEY` when `CLEANUP_PROVIDER=openrouter`.
 - Cleanup uses `DEEPSEEK_API_KEY` when `CLEANUP_PROVIDER=deepseek`.
 - Cleanup supports Russian, English, and mixed Russian/English text.
+- Cleanup can auto-detect whether to use a Russian, English, or multilingual cleanup prompt when `language` is not provided.
 
 ## Error handling
 

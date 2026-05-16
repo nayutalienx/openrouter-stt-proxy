@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import logging
 import os
+import re
 import time
 from pathlib import Path
 from typing import Any
@@ -83,6 +84,28 @@ def normalize_language_hint(language: str | None) -> str | None:
     if normalized in {"en", "en-us", "en-gb", "eng", "english"}:
         return "en"
     return normalized
+
+
+def detect_cleanup_language(raw_text: str, language: str | None = None) -> str:
+    normalized_language = normalize_language_hint(language)
+    if normalized_language in {"ru", "en"}:
+        return normalized_language
+
+    cyrillic_count = len(re.findall(r"[А-Яа-яЁё]", raw_text))
+    latin_count = len(re.findall(r"[A-Za-z]", raw_text))
+    total_letters = cyrillic_count + latin_count
+
+    if total_letters == 0:
+        return "multilingual"
+
+    cyrillic_ratio = cyrillic_count / total_letters
+    latin_ratio = latin_count / total_letters
+
+    if cyrillic_count >= 12 and cyrillic_ratio >= 0.85:
+        return "ru"
+    if latin_count >= 12 and latin_ratio >= 0.85:
+        return "en"
+    return "multilingual"
 
 
 OPENROUTER_TRANSCRIPTIONS_URL = "https://openrouter.ai/api/v1/audio/transcriptions"
@@ -410,22 +433,20 @@ Rules:
 
 
 def build_cleanup_prompt(mode: str, raw_text: str, language: str | None = None) -> str:
-    del raw_text
-
-    normalized_language = normalize_language_hint(language)
-    if normalized_language == "ru":
+    detected_language = detect_cleanup_language(raw_text, language=language)
+    if detected_language == "ru":
         return build_russian_cleanup_prompt(mode)
-    if normalized_language == "en":
+    if detected_language == "en":
         return build_english_cleanup_prompt(mode)
     return build_multilingual_cleanup_prompt(mode, language=language)
 
 
 def build_cleanup_messages(mode: str, raw_text: str, language: str | None = None) -> list[dict[str, str]]:
-    normalized_language = normalize_language_hint(language)
+    detected_language = detect_cleanup_language(raw_text, language=language)
     user_prefix = "Сырой текст диктовки:"
-    if normalized_language == "en":
+    if detected_language == "en":
         user_prefix = "Raw dictated text:"
-    elif normalized_language not in {"ru", None}:
+    elif detected_language == "multilingual":
         user_prefix = "Raw dictated text:"
 
     return [
@@ -600,6 +621,7 @@ async def cleanup_text(raw_text: str, language: str | None = None) -> str:
         )
         return raw_text
 
+    detected_language = detect_cleanup_language(normalized_text, language=language)
     messages = build_cleanup_messages(CLEANUP_MODE, normalized_text, language=language)
     payload: dict[str, Any] = {
         "model": CLEANUP_MODEL,
@@ -634,11 +656,12 @@ async def cleanup_text(raw_text: str, language: str | None = None) -> str:
 
     cleanup_payload = parse_upstream_payload(response)
     logger.info(
-        "Cleanup response status=%s cleanup_provider=%s cleanup_model=%s cleanup_mode=%s",
+        "Cleanup response status=%s cleanup_provider=%s cleanup_model=%s cleanup_mode=%s cleanup_language=%s",
         response.status_code,
         CLEANUP_PROVIDER,
         CLEANUP_MODEL,
         CLEANUP_MODE,
+        detected_language,
     )
 
     if response.status_code in {status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN}:
