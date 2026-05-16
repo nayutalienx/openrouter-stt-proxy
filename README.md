@@ -10,6 +10,7 @@ Small local Windows-friendly proxy that accepts OpenAI-style multipart transcrip
 - Converts audio bytes to base64 JSON for OpenRouter STT
 - Sends the request to `https://openrouter.ai/api/v1/audio/transcriptions`
 - Optionally sends the raw transcript to `deepseek/deepseek-v4-flash` for cleanup
+- Supports Russian, English, and mixed Russian/English dictation in the cleanup stage
 - Returns an OpenAI-compatible transcription response:
 
 ```json
@@ -115,6 +116,14 @@ LOCAL_PROXY_API_KEY=
 ## Optional cleanup with DeepSeek V4 Flash
 
 The cleanup step improves punctuation, casing, grammar, and obvious ASR mistakes after Qwen STT produces the raw transcript. This is useful when you dictate into OpenWhispr and want readable chat-style text without changing the meaning.
+
+Cleanup language behavior:
+
+- `language=ru`: uses a Russian cleanup prompt
+- `language=en`: uses an English cleanup prompt
+- no `language` or mixed-language dictation: uses a multilingual-safe cleanup prompt that preserves Russian/English switching
+
+For mixed Russian/English dictation, it is usually better to leave `language` unset so STT and cleanup can preserve the language mix naturally.
 
 Enable cleanup:
 
@@ -333,6 +342,7 @@ curl -X POST http://127.0.0.1:8787/v1/audio/transcriptions ^
 - STT uses `OPENROUTER_API_KEY`.
 - Cleanup uses `OPENROUTER_API_KEY` when `CLEANUP_PROVIDER=openrouter`.
 - Cleanup uses `DEEPSEEK_API_KEY` when `CLEANUP_PROVIDER=deepseek`.
+- Cleanup supports Russian, English, and mixed Russian/English text.
 
 ## Error handling
 

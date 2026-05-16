@@ -73,6 +73,18 @@ def normalize_cleanup_mode(mode: str) -> str:
     return "chat"
 
 
+def normalize_language_hint(language: str | None) -> str | None:
+    if not language or not language.strip():
+        return None
+
+    normalized = language.strip().lower()
+    if normalized in {"ru", "rus", "ru-ru", "russian"}:
+        return "ru"
+    if normalized in {"en", "en-us", "en-gb", "eng", "english"}:
+        return "en"
+    return normalized
+
+
 OPENROUTER_TRANSCRIPTIONS_URL = "https://openrouter.ai/api/v1/audio/transcriptions"
 OPENROUTER_CHAT_COMPLETIONS_URL = "https://openrouter.ai/api/v1/chat/completions"
 DEFAULT_DEEPSEEK_BASE_URL = "https://api.deepseek.com"
@@ -305,10 +317,8 @@ def extract_text_from_chat_response(payload: Any) -> str | None:
     return None
 
 
-def build_cleanup_prompt(mode: str, raw_text: str, language: str | None = None) -> str:
-    del raw_text
-
-    base_prompt = """Ты редактор русской диктовки.
+def build_russian_cleanup_prompt(mode: str) -> str:
+    base_prompt = """Ты редактор диктовки на русском языке.
 
 Твоя задача — превратить сырой распознанный голосовой текст в аккуратный естественный письменный текст.
 
@@ -331,17 +341,93 @@ def build_cleanup_prompt(mode: str, raw_text: str, language: str | None = None) 
         "punctuation": "Сосредоточься почти только на пунктуации, регистре, грамматике и явных ASR-ошибках. Перефразируй как можно меньше.",
     }[normalize_cleanup_mode(mode)]
 
+    return f"{base_prompt}\n\n{mode_prompt}"
+
+
+def build_english_cleanup_prompt(mode: str) -> str:
+    base_prompt = """You are an editor for dictated English text.
+
+Your task is to turn raw speech recognition output into clean, natural written text.
+
+Rules:
+- Do not add new facts.
+- Do not change the meaning.
+- Do not shorten the text aggressively.
+- Fix punctuation, capitalization, grammar, and obvious recognition mistakes.
+- Remove obvious repetitions, filler words, and false starts only when they are not needed for meaning.
+- Preserve the author's natural voice.
+- Do not make the text sound too formal unless asked by the mode.
+- If the text is long, split it into paragraphs when helpful.
+- If the text looks like a chat message, format it like a normal message.
+- Do not add commentary, explanations, headings, or Markdown.
+- Return only the cleaned text."""
+
+    mode_prompt = {
+        "chat": "Make the text sound like a natural message with a live, conversational tone.",
+        "formal": "Make the text more polished and businesslike without changing its meaning.",
+        "punctuation": "Focus almost only on punctuation, capitalization, grammar, and obvious ASR mistakes. Rephrase as little as possible.",
+    }[normalize_cleanup_mode(mode)]
+
+    return f"{base_prompt}\n\n{mode_prompt}"
+
+
+def build_multilingual_cleanup_prompt(mode: str, language: str | None = None) -> str:
+    base_prompt = """You are an editor for dictated text.
+
+Your task is to turn raw speech recognition output into clean, natural written text.
+
+Rules:
+- Do not add new facts.
+- Do not change the meaning.
+- Do not shorten the text aggressively.
+- Fix punctuation, capitalization, grammar, and obvious recognition mistakes.
+- Preserve the original language of each segment.
+- If the text mixes Russian and English, keep that language mix intact.
+- Keep technical names, commands, product names, and code terms in the language and form the speaker used unless there is an obvious recognition mistake.
+- Remove obvious repetitions, filler words, and false starts only when they are not needed for meaning.
+- Preserve the author's natural voice.
+- Do not make the text sound too formal unless asked by the mode.
+- If the text is long, split it into paragraphs when helpful.
+- If the text looks like a chat message, format it like a normal message.
+- Do not add commentary, explanations, headings, or Markdown.
+- Return only the cleaned text."""
+
+    mode_prompt = {
+        "chat": "Make the text sound like a natural message with a live, conversational tone.",
+        "formal": "Make the text more polished and businesslike without changing its meaning.",
+        "punctuation": "Focus almost only on punctuation, capitalization, grammar, and obvious ASR mistakes. Rephrase as little as possible.",
+    }[normalize_cleanup_mode(mode)]
+
     language_hint = ""
-    if language and language.strip().lower() not in {"ru", "rus", "russian"}:
+    normalized_language = normalize_language_hint(language)
+    if normalized_language and normalized_language not in {"ru", "en"}:
         language_hint = (
-            f"\nОсновной язык текста: {language.strip()}. "
-            "Сохраняй исходный язык автора и исправляй только оформление и очевидные ошибки распознавания."
+            f"\nPrimary language hint from the caller: {language.strip()}. "
+            "Preserve that language while still keeping any mixed-language fragments intact."
         )
 
     return f"{base_prompt}\n\n{mode_prompt}{language_hint}"
 
 
+def build_cleanup_prompt(mode: str, raw_text: str, language: str | None = None) -> str:
+    del raw_text
+
+    normalized_language = normalize_language_hint(language)
+    if normalized_language == "ru":
+        return build_russian_cleanup_prompt(mode)
+    if normalized_language == "en":
+        return build_english_cleanup_prompt(mode)
+    return build_multilingual_cleanup_prompt(mode, language=language)
+
+
 def build_cleanup_messages(mode: str, raw_text: str, language: str | None = None) -> list[dict[str, str]]:
+    normalized_language = normalize_language_hint(language)
+    user_prefix = "Сырой текст диктовки:"
+    if normalized_language == "en":
+        user_prefix = "Raw dictated text:"
+    elif normalized_language not in {"ru", None}:
+        user_prefix = "Raw dictated text:"
+
     return [
         {
             "role": "system",
@@ -349,7 +435,7 @@ def build_cleanup_messages(mode: str, raw_text: str, language: str | None = None
         },
         {
             "role": "user",
-            "content": f"Сырой текст диктовки:\n{raw_text}",
+            "content": f"{user_prefix}\n{raw_text}",
         },
     ]
 
