@@ -56,7 +56,8 @@ py -3 --version
 Open PowerShell in the project folder:
 
 ```powershell
-cd C:\Users\nayut\Documents\Projects\open-whisper-proxy\openrouter-stt-proxy
+git clone https://github.com/nayutalienx/openrouter-stt-proxy.git
+cd openrouter-stt-proxy
 ```
 
 Create `.env` from the example:
@@ -335,7 +336,7 @@ Cleanup:
 ## Quick start
 
 1. Install Python 3.10+.
-2. Open `C:\Users\nayut\Documents\Projects\open-whisper-proxy\openrouter-stt-proxy`.
+2. Clone the repository and open the project folder.
 3. Run `Copy-Item .env.example .env`.
 4. Put your OpenRouter key into `.env`.
 5. Start the proxy with `.\run.ps1`.
