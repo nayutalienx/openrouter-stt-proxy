@@ -5,6 +5,7 @@ import ctypes
 from ctypes import wintypes
 import logging
 import os
+import queue
 import subprocess
 import threading
 import time
@@ -118,6 +119,9 @@ DEEPSEEK_BASE_URL = get_optional_env("DEEPSEEK_BASE_URL") or DEFAULT_DEEPSEEK_BA
 CLEANUP_TOGGLE_HOTKEY = (get_optional_env("CLEANUP_TOGGLE_HOTKEY") or "").strip().upper()
 CLEANUP_DEFAULT_ACTIVE = get_env_bool("CLEANUP_DEFAULT_ACTIVE", False)
 CLEANUP_WINDOWS_NOTIFICATIONS = get_env_bool("CLEANUP_WINDOWS_NOTIFICATIONS", True)
+CLEANUP_NOTIFICATION_MODE = (get_optional_env("CLEANUP_NOTIFICATION_MODE") or "overlay").strip().lower()
+CLEANUP_NOTIFICATION_DURATION_MS = max(get_env_int("CLEANUP_NOTIFICATION_DURATION_MS", 1600), 400)
+CLEANUP_NOTIFICATION_MAX_STACK = max(get_env_int("CLEANUP_NOTIFICATION_MAX_STACK", 4), 1)
 
 SUPPORTED_FORMATS: dict[str, str] = {
     ".wav": "wav",
@@ -152,6 +156,8 @@ cleanup_state_lock = threading.Lock()
 cleanup_runtime_active = ENABLE_CLEANUP and CLEANUP_DEFAULT_ACTIVE
 cleanup_toggle_listener_started = False
 cleanup_toggle_registered = False
+cleanup_overlay_notifier: CleanupOverlayNotifier | None = None
+cleanup_overlay_notifier_lock = threading.Lock()
 
 
 class DebugCleanupRequest(BaseModel):
@@ -159,8 +165,144 @@ class DebugCleanupRequest(BaseModel):
     language: str | None = None
 
 
+class CleanupOverlayNotifier:
+    def __init__(self, *, duration_ms: int, max_stack: int) -> None:
+        self.duration_ms = duration_ms
+        self.max_stack = max_stack
+        self.message_queue: queue.Queue[tuple[str, str, bool]] = queue.Queue()
+        self.thread = threading.Thread(
+            target=self._run,
+            name="cleanup-overlay-notifier",
+            daemon=True,
+        )
+        self.start_once = threading.Event()
+        self.started = False
+
+    def start(self) -> None:
+        if self.started:
+            return
+        self.started = True
+        self.thread.start()
+        self.start_once.wait(timeout=2)
+
+    def show(self, *, title: str, body: str, active: bool) -> None:
+        self.start()
+        self.message_queue.put((title, body, active))
+
+    def _run(self) -> None:
+        try:
+            import tkinter as tk
+        except Exception as exc:
+            logger.warning("Failed to start cleanup overlay notifier: %s", exc)
+            self.start_once.set()
+            return
+
+        root = tk.Tk()
+        root.withdraw()
+        active_windows: list[tk.Toplevel] = []
+        self.start_once.set()
+
+        def place_windows() -> None:
+            margin_x = 18
+            margin_y = 18
+            spacing = 10
+            screen_width = root.winfo_screenwidth()
+            screen_height = root.winfo_screenheight()
+            next_bottom = screen_height - margin_y
+
+            for window in reversed(active_windows):
+                if not window.winfo_exists():
+                    continue
+                window.update_idletasks()
+                width = window.winfo_width()
+                height = window.winfo_height()
+                x_pos = max(screen_width - width - margin_x, margin_x)
+                y_pos = max(next_bottom - height, margin_y)
+                window.geometry(f"+{x_pos}+{y_pos}")
+                next_bottom = y_pos - spacing
+
+        def destroy_window(window: tk.Toplevel) -> None:
+            if window in active_windows:
+                active_windows.remove(window)
+            if window.winfo_exists():
+                window.destroy()
+            place_windows()
+
+        def create_window(title: str, body: str, active: bool) -> None:
+            while len(active_windows) >= self.max_stack:
+                destroy_window(active_windows[0])
+
+            bg_color = "#102a43" if active else "#3a3f47"
+            accent_color = "#2bb673" if active else "#8b949e"
+            title_color = "#f8fafc"
+            body_color = "#dbe4ee"
+
+            window = tk.Toplevel(root)
+            window.overrideredirect(True)
+            window.attributes("-topmost", True)
+            window.configure(bg=bg_color)
+
+            frame = tk.Frame(
+                window,
+                bg=bg_color,
+                highlightthickness=1,
+                highlightbackground=accent_color,
+                bd=0,
+                padx=14,
+                pady=12,
+            )
+            frame.pack(fill="both", expand=True)
+
+            indicator = tk.Frame(frame, bg=accent_color, width=6, height=54)
+            indicator.pack(side="left", fill="y", padx=(0, 10))
+
+            content = tk.Frame(frame, bg=bg_color)
+            content.pack(side="left", fill="both", expand=True)
+
+            title_label = tk.Label(
+                content,
+                text=title,
+                bg=bg_color,
+                fg=title_color,
+                font=("Segoe UI Semibold", 11),
+                anchor="w",
+                justify="left",
+            )
+            title_label.pack(fill="x")
+
+            body_label = tk.Label(
+                content,
+                text=body,
+                bg=bg_color,
+                fg=body_color,
+                font=("Segoe UI", 10),
+                anchor="w",
+                justify="left",
+                wraplength=280,
+            )
+            body_label.pack(fill="x", pady=(4, 0))
+
+            active_windows.append(window)
+            place_windows()
+            window.after(self.duration_ms, lambda win=window: destroy_window(win))
+
+        def drain_queue() -> None:
+            try:
+                while True:
+                    title, body, active = self.message_queue.get_nowait()
+                    create_window(title, body, active)
+            except queue.Empty:
+                pass
+
+            root.after(40, drain_queue)
+
+        drain_queue()
+        root.mainloop()
+
+
 @app.on_event("startup")
 async def startup_event() -> None:
+    ensure_cleanup_overlay_notifier_started()
     ensure_cleanup_toggle_listener_started()
 
 
@@ -261,12 +403,40 @@ def toggle_cleanup_runtime_active() -> bool:
         return cleanup_runtime_active
 
 
+def ensure_cleanup_overlay_notifier_started() -> None:
+    global cleanup_overlay_notifier
+
+    if (
+        os.name != "nt"
+        or not CLEANUP_WINDOWS_NOTIFICATIONS
+        or CLEANUP_NOTIFICATION_MODE != "overlay"
+    ):
+        return
+
+    with cleanup_overlay_notifier_lock:
+        if cleanup_overlay_notifier is None:
+            cleanup_overlay_notifier = CleanupOverlayNotifier(
+                duration_ms=CLEANUP_NOTIFICATION_DURATION_MS,
+                max_stack=CLEANUP_NOTIFICATION_MAX_STACK,
+            )
+            cleanup_overlay_notifier.start()
+
+
 def send_windows_cleanup_notification(active: bool) -> None:
     if not CLEANUP_WINDOWS_NOTIFICATIONS or os.name != "nt":
         return
 
     title = "OpenRouter STT Proxy"
     body = "Cleanup enabled" if active else "Cleanup disabled"
+
+    if CLEANUP_NOTIFICATION_MODE == "overlay":
+        ensure_cleanup_overlay_notifier_started()
+        if cleanup_overlay_notifier is not None:
+            try:
+                cleanup_overlay_notifier.show(title=title, body=body, active=active)
+                return
+            except Exception as exc:
+                logger.warning("Failed to show cleanup overlay notification: %s", exc)
 
     if notify_windows_toast is not None:
         try:

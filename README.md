@@ -90,6 +90,9 @@ DEEPSEEK_BASE_URL=https://api.deepseek.com
 CLEANUP_TOGGLE_HOTKEY=CTRL+2
 CLEANUP_DEFAULT_ACTIVE=false
 CLEANUP_WINDOWS_NOTIFICATIONS=true
+CLEANUP_NOTIFICATION_MODE=overlay
+CLEANUP_NOTIFICATION_DURATION_MS=1600
+CLEANUP_NOTIFICATION_MAX_STACK=4
 DEBUG_ENDPOINTS=false
 LOCAL_PROXY_API_KEY=
 ```
@@ -116,6 +119,9 @@ LOCAL_PROXY_API_KEY=
 - `CLEANUP_TOGGLE_HOTKEY`: optional Windows global hotkey for toggling cleanup on and off. Default is `CTRL+2`.
 - `CLEANUP_DEFAULT_ACTIVE`: whether cleanup starts enabled when the proxy launches. Default is `false`.
 - `CLEANUP_WINDOWS_NOTIFICATIONS`: show a Windows toast notification when cleanup is toggled. Default is `true`.
+- `CLEANUP_NOTIFICATION_MODE`: `overlay`, `toast`, or any other fallback mode. `overlay` is the default and shows fast custom popup cards in the bottom-right corner.
+- `CLEANUP_NOTIFICATION_DURATION_MS`: how long each custom overlay stays visible. Default is `1600`.
+- `CLEANUP_NOTIFICATION_MAX_STACK`: max number of simultaneous overlay cards shown during rapid toggling. Default is `4`.
 - `DEBUG_ENDPOINTS`: when `true`, debug endpoints are allowed beyond strict localhost-only access rules.
 - `LOCAL_PROXY_API_KEY`: optional local auth key. Leave empty to disable local auth.
 
@@ -137,13 +143,16 @@ Optional cleanup toggle hotkey:
 CLEANUP_TOGGLE_HOTKEY=CTRL+2
 CLEANUP_DEFAULT_ACTIVE=false
 CLEANUP_WINDOWS_NOTIFICATIONS=true
+CLEANUP_NOTIFICATION_MODE=overlay
+CLEANUP_NOTIFICATION_DURATION_MS=1600
+CLEANUP_NOTIFICATION_MAX_STACK=4
 ```
 
 With that setting, the proxy toggles cleanup state when you press `Ctrl+2` anywhere in Windows. This is useful on Windows for push-to-talk workflows such as:
 
 - press `Ctrl+2` once -> cleanup enabled
 - press `Ctrl+2` again -> cleanup disabled
-- Windows shows a toast notification so you can see the current state
+- the proxy shows a fast custom overlay in the bottom-right corner so you can see the current state even when you toggle quickly
 
 Enable cleanup:
 
