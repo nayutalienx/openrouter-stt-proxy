@@ -87,7 +87,9 @@ CLEANUP_MAX_INPUT_CHARS=12000
 CLEANUP_MODE=chat
 DEEPSEEK_API_KEY=
 DEEPSEEK_BASE_URL=https://api.deepseek.com
-CLEANUP_HOLD_KEY=
+CLEANUP_TOGGLE_HOTKEY=CTRL+2
+CLEANUP_DEFAULT_ACTIVE=false
+CLEANUP_WINDOWS_NOTIFICATIONS=true
 DEBUG_ENDPOINTS=false
 LOCAL_PROXY_API_KEY=
 ```
@@ -111,7 +113,9 @@ LOCAL_PROXY_API_KEY=
 - `CLEANUP_MODE`: `chat`, `formal`, or `punctuation`.
 - `DEEPSEEK_API_KEY`: required only when `CLEANUP_PROVIDER=deepseek`.
 - `DEEPSEEK_BASE_URL`: defaults to `https://api.deepseek.com`.
-- `CLEANUP_HOLD_KEY`: optional Windows-only gate for cleanup. Example: `2` means cleanup runs only while the `2` key is held at request time.
+- `CLEANUP_TOGGLE_HOTKEY`: optional Windows global hotkey for toggling cleanup on and off. Default is `CTRL+2`.
+- `CLEANUP_DEFAULT_ACTIVE`: whether cleanup starts enabled when the proxy launches. Default is `false`.
+- `CLEANUP_WINDOWS_NOTIFICATIONS`: show a Windows toast notification when cleanup is toggled. Default is `true`.
 - `DEBUG_ENDPOINTS`: when `true`, debug endpoints are allowed beyond strict localhost-only access rules.
 - `LOCAL_PROXY_API_KEY`: optional local auth key. Leave empty to disable local auth.
 
@@ -127,16 +131,19 @@ Cleanup language behavior:
 
 This keeps the backend simpler and avoids separate Russian-only and English-only prompt branches.
 
-Optional hold-key gate:
+Optional cleanup toggle hotkey:
 
 ```env
-CLEANUP_HOLD_KEY=2
+CLEANUP_TOGGLE_HOTKEY=CTRL+2
+CLEANUP_DEFAULT_ACTIVE=false
+CLEANUP_WINDOWS_NOTIFICATIONS=true
 ```
 
-With that setting, the proxy skips cleanup unless the `2` key is physically held when the request reaches the backend. This is useful on Windows for push-to-talk workflows such as:
+With that setting, the proxy toggles cleanup state when you press `Ctrl+2` anywhere in Windows. This is useful on Windows for push-to-talk workflows such as:
 
-- `Ctrl+1` -> raw transcript without cleanup
-- `Ctrl+1` while also holding `2` -> transcript with cleanup
+- press `Ctrl+2` once -> cleanup enabled
+- press `Ctrl+2` again -> cleanup disabled
+- Windows shows a toast notification so you can see the current state
 
 Enable cleanup:
 
@@ -233,10 +240,12 @@ Response:
   "provider": "openrouter",
   "default_stt_model": "qwen/qwen3-asr-flash-2026-02-10",
   "cleanup_enabled": true,
+  "cleanup_active": false,
   "cleanup_provider": "openrouter",
   "cleanup_model": "deepseek/deepseek-v4-flash",
   "cleanup_mode": "chat",
-  "cleanup_hold_key": null
+  "cleanup_toggle_hotkey": "CTRL+2",
+  "cleanup_default_active": false
 }
 ```
 

@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import base64
 import ctypes
+from ctypes import wintypes
 import logging
 import os
+import subprocess
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -107,7 +110,9 @@ CLEANUP_MAX_INPUT_CHARS = get_env_int("CLEANUP_MAX_INPUT_CHARS", 12000)
 CLEANUP_MODE = normalize_cleanup_mode(get_optional_env("CLEANUP_MODE") or "chat")
 DEBUG_ENDPOINTS = get_env_bool("DEBUG_ENDPOINTS", False)
 DEEPSEEK_BASE_URL = get_optional_env("DEEPSEEK_BASE_URL") or DEFAULT_DEEPSEEK_BASE_URL
-CLEANUP_HOLD_KEY = (get_optional_env("CLEANUP_HOLD_KEY") or "").strip().upper()
+CLEANUP_TOGGLE_HOTKEY = (get_optional_env("CLEANUP_TOGGLE_HOTKEY") or "").strip().upper()
+CLEANUP_DEFAULT_ACTIVE = get_env_bool("CLEANUP_DEFAULT_ACTIVE", False)
+CLEANUP_WINDOWS_NOTIFICATIONS = get_env_bool("CLEANUP_WINDOWS_NOTIFICATIONS", True)
 
 SUPPORTED_FORMATS: dict[str, str] = {
     ".wav": "wav",
@@ -121,6 +126,14 @@ SUPPORTED_FORMATS: dict[str, str] = {
 ALLOWED_RESPONSE_FORMATS = {"text", "json", "verbose_json", "", None}
 LOCAL_CLIENT_HOSTS = {"127.0.0.1", "::1", "localhost"}
 TEXT_PREVIEW_CHARS = 120
+WM_HOTKEY = 0x0312
+MOD_ALT = 0x0001
+MOD_CONTROL = 0x0002
+MOD_SHIFT = 0x0004
+MOD_WIN = 0x0008
+MOD_NOREPEAT = 0x4000
+HOTKEY_ID_CLEANUP_TOGGLE = 1
+CREATE_NO_WINDOW = 0x08000000
 
 logging.basicConfig(
     level=logging.INFO,
@@ -130,11 +143,20 @@ logger = logging.getLogger("openrouter-stt-proxy")
 
 app = FastAPI(title="OpenRouter STT Proxy", version="1.1.0")
 bearer_scheme = HTTPBearer(auto_error=False)
+cleanup_state_lock = threading.Lock()
+cleanup_runtime_active = ENABLE_CLEANUP and CLEANUP_DEFAULT_ACTIVE
+cleanup_toggle_listener_started = False
+cleanup_toggle_registered = False
 
 
 class DebugCleanupRequest(BaseModel):
     text: str = Field(min_length=1)
     language: str | None = None
+
+
+@app.on_event("startup")
+async def startup_event() -> None:
+    ensure_cleanup_toggle_listener_started()
 
 
 def build_openrouter_headers() -> dict[str, str]:
@@ -197,18 +219,124 @@ def get_windows_virtual_key_code(key: str) -> int | None:
     return function_keys.get(key)
 
 
-def is_cleanup_hold_key_active() -> bool:
-    if not CLEANUP_HOLD_KEY:
-        return True
-    if os.name != "nt":
-        return False
+def parse_toggle_hotkey(hotkey: str) -> tuple[int, int] | None:
+    if not hotkey:
+        return None
 
-    virtual_key = get_windows_virtual_key_code(CLEANUP_HOLD_KEY)
+    modifiers = 0
+    virtual_key: int | None = None
+    parts = [part.strip().upper() for part in hotkey.split("+") if part.strip()]
+
+    for part in parts:
+        if part in {"CTRL", "CONTROL"}:
+            modifiers |= MOD_CONTROL
+        elif part == "ALT":
+            modifiers |= MOD_ALT
+        elif part == "SHIFT":
+            modifiers |= MOD_SHIFT
+        elif part in {"WIN", "WINDOWS"}:
+            modifiers |= MOD_WIN
+        else:
+            virtual_key = get_windows_virtual_key_code(part)
+
     if virtual_key is None:
-        logger.warning("Unsupported CLEANUP_HOLD_KEY=%s. Cleanup hold-key gate disabled.", CLEANUP_HOLD_KEY)
-        return True
+        return None
+    return modifiers | MOD_NOREPEAT, virtual_key
 
-    return bool(ctypes.windll.user32.GetAsyncKeyState(virtual_key) & 0x8000)
+
+def is_cleanup_runtime_active() -> bool:
+    with cleanup_state_lock:
+        return cleanup_runtime_active
+
+
+def toggle_cleanup_runtime_active() -> bool:
+    global cleanup_runtime_active
+    with cleanup_state_lock:
+        cleanup_runtime_active = not cleanup_runtime_active
+        return cleanup_runtime_active
+
+
+def send_windows_cleanup_notification(active: bool) -> None:
+    if not CLEANUP_WINDOWS_NOTIFICATIONS or os.name != "nt":
+        return
+
+    body = "Cleanup enabled" if active else "Cleanup disabled"
+    script = (
+        "[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] > $null; "
+        "[Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime] > $null; "
+        "$xml = New-Object Windows.Data.Xml.Dom.XmlDocument; "
+        f"$xml.LoadXml('<toast><visual><binding template=\"ToastGeneric\"><text>OpenRouter STT Proxy</text><text>{body}</text></binding></visual></toast>'); "
+        "$toast = [Windows.UI.Notifications.ToastNotification]::new($xml); "
+        "[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('OpenRouter STT Proxy').Show($toast)"
+    )
+
+    try:
+        subprocess.run(
+            [
+                "powershell.exe",
+                "-NoProfile",
+                "-NonInteractive",
+                "-WindowStyle",
+                "Hidden",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                script,
+            ],
+            check=False,
+            timeout=5,
+            creationflags=CREATE_NO_WINDOW,
+        )
+    except Exception as exc:
+        logger.warning("Failed to send Windows cleanup notification: %s", exc)
+
+
+def run_cleanup_toggle_hotkey_listener() -> None:
+    global cleanup_toggle_registered
+
+    if os.name != "nt" or not ENABLE_CLEANUP or not CLEANUP_TOGGLE_HOTKEY:
+        return
+
+    parsed_hotkey = parse_toggle_hotkey(CLEANUP_TOGGLE_HOTKEY)
+    if parsed_hotkey is None:
+        logger.warning("Unsupported CLEANUP_TOGGLE_HOTKEY=%s. Cleanup toggle listener not started.", CLEANUP_TOGGLE_HOTKEY)
+        return
+
+    modifiers, virtual_key = parsed_hotkey
+    user32 = ctypes.windll.user32
+    registered = user32.RegisterHotKey(None, HOTKEY_ID_CLEANUP_TOGGLE, modifiers, virtual_key)
+    if not registered:
+        logger.warning("Failed to register cleanup toggle hotkey %s.", CLEANUP_TOGGLE_HOTKEY)
+        return
+
+    cleanup_toggle_registered = True
+    logger.info(
+        "Cleanup toggle hotkey listener started hotkey=%s default_active=%s",
+        CLEANUP_TOGGLE_HOTKEY,
+        is_cleanup_runtime_active(),
+    )
+
+    msg = wintypes.MSG()
+    while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) != 0:
+        if msg.message == WM_HOTKEY and msg.wParam == HOTKEY_ID_CLEANUP_TOGGLE:
+            active = toggle_cleanup_runtime_active()
+            logger.info("Cleanup toggled active=%s hotkey=%s", active, CLEANUP_TOGGLE_HOTKEY)
+            send_windows_cleanup_notification(active)
+
+
+def ensure_cleanup_toggle_listener_started() -> None:
+    global cleanup_toggle_listener_started
+
+    if cleanup_toggle_listener_started:
+        return
+    cleanup_toggle_listener_started = True
+
+    listener_thread = threading.Thread(
+        target=run_cleanup_toggle_hotkey_listener,
+        name="cleanup-toggle-hotkey-listener",
+        daemon=True,
+    )
+    listener_thread.start()
 
 
 def resolve_audio_format(filename: str | None) -> str:
@@ -537,19 +665,19 @@ async def transcribe_with_openrouter(
 async def cleanup_text(raw_text: str, language: str | None = None) -> str:
     if not ENABLE_CLEANUP:
         logger.info(
-            "Cleanup response status=skipped reason=disabled cleanup_enabled=%s cleanup_provider=%s cleanup_model=%s cleanup_mode=%s cleanup_hold_key=%s",
+            "Cleanup response status=skipped reason=disabled cleanup_enabled=%s cleanup_provider=%s cleanup_model=%s cleanup_mode=%s cleanup_toggle_hotkey=%s",
             ENABLE_CLEANUP,
             CLEANUP_PROVIDER,
             CLEANUP_MODEL,
             CLEANUP_MODE,
-            CLEANUP_HOLD_KEY,
+            CLEANUP_TOGGLE_HOTKEY,
         )
         return raw_text
 
-    if not is_cleanup_hold_key_active():
+    if not is_cleanup_runtime_active():
         logger.info(
-            "Cleanup response status=skipped reason=hold_key_not_active cleanup_hold_key=%s",
-            CLEANUP_HOLD_KEY or "none",
+            "Cleanup response status=skipped reason=toggle_off cleanup_toggle_hotkey=%s",
+            CLEANUP_TOGGLE_HOTKEY or "none",
         )
         return raw_text
 
@@ -656,10 +784,12 @@ async def health() -> dict[str, Any]:
         "provider": "openrouter",
         "default_stt_model": DEFAULT_STT_MODEL,
         "cleanup_enabled": ENABLE_CLEANUP,
+        "cleanup_active": is_cleanup_runtime_active(),
         "cleanup_provider": CLEANUP_PROVIDER,
         "cleanup_model": CLEANUP_MODEL,
         "cleanup_mode": CLEANUP_MODE,
-        "cleanup_hold_key": CLEANUP_HOLD_KEY or None,
+        "cleanup_toggle_hotkey": CLEANUP_TOGGLE_HOTKEY or None,
+        "cleanup_default_active": CLEANUP_DEFAULT_ACTIVE,
     }
 
 
