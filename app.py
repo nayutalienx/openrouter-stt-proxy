@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import ctypes
 import logging
 import os
 import time
@@ -106,6 +107,7 @@ CLEANUP_MAX_INPUT_CHARS = get_env_int("CLEANUP_MAX_INPUT_CHARS", 12000)
 CLEANUP_MODE = normalize_cleanup_mode(get_optional_env("CLEANUP_MODE") or "chat")
 DEBUG_ENDPOINTS = get_env_bool("DEBUG_ENDPOINTS", False)
 DEEPSEEK_BASE_URL = get_optional_env("DEEPSEEK_BASE_URL") or DEFAULT_DEEPSEEK_BASE_URL
+CLEANUP_HOLD_KEY = (get_optional_env("CLEANUP_HOLD_KEY") or "").strip().upper()
 
 SUPPORTED_FORMATS: dict[str, str] = {
     ".wav": "wav",
@@ -176,6 +178,37 @@ def get_cleanup_owned_by() -> str:
     if CLEANUP_PROVIDER == "deepseek":
         return "deepseek"
     return "openrouter"
+
+
+def get_windows_virtual_key_code(key: str) -> int | None:
+    if not key:
+        return None
+    if len(key) == 1:
+        char = key.upper()
+        if "0" <= char <= "9":
+            return ord(char)
+        if "A" <= char <= "Z":
+            return ord(char)
+
+    function_keys = {
+        f"F{index}": 0x6F + index
+        for index in range(1, 13)
+    }
+    return function_keys.get(key)
+
+
+def is_cleanup_hold_key_active() -> bool:
+    if not CLEANUP_HOLD_KEY:
+        return True
+    if os.name != "nt":
+        return False
+
+    virtual_key = get_windows_virtual_key_code(CLEANUP_HOLD_KEY)
+    if virtual_key is None:
+        logger.warning("Unsupported CLEANUP_HOLD_KEY=%s. Cleanup hold-key gate disabled.", CLEANUP_HOLD_KEY)
+        return True
+
+    return bool(ctypes.windll.user32.GetAsyncKeyState(virtual_key) & 0x8000)
 
 
 def resolve_audio_format(filename: str | None) -> str:
@@ -504,11 +537,19 @@ async def transcribe_with_openrouter(
 async def cleanup_text(raw_text: str, language: str | None = None) -> str:
     if not ENABLE_CLEANUP:
         logger.info(
-            "Cleanup response status=skipped reason=disabled cleanup_enabled=%s cleanup_provider=%s cleanup_model=%s cleanup_mode=%s",
+            "Cleanup response status=skipped reason=disabled cleanup_enabled=%s cleanup_provider=%s cleanup_model=%s cleanup_mode=%s cleanup_hold_key=%s",
             ENABLE_CLEANUP,
             CLEANUP_PROVIDER,
             CLEANUP_MODEL,
             CLEANUP_MODE,
+            CLEANUP_HOLD_KEY,
+        )
+        return raw_text
+
+    if not is_cleanup_hold_key_active():
+        logger.info(
+            "Cleanup response status=skipped reason=hold_key_not_active cleanup_hold_key=%s",
+            CLEANUP_HOLD_KEY or "none",
         )
         return raw_text
 
@@ -618,6 +659,7 @@ async def health() -> dict[str, Any]:
         "cleanup_provider": CLEANUP_PROVIDER,
         "cleanup_model": CLEANUP_MODEL,
         "cleanup_mode": CLEANUP_MODE,
+        "cleanup_hold_key": CLEANUP_HOLD_KEY or None,
     }
 
 

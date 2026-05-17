@@ -87,6 +87,7 @@ CLEANUP_MAX_INPUT_CHARS=12000
 CLEANUP_MODE=chat
 DEEPSEEK_API_KEY=
 DEEPSEEK_BASE_URL=https://api.deepseek.com
+CLEANUP_HOLD_KEY=
 DEBUG_ENDPOINTS=false
 LOCAL_PROXY_API_KEY=
 ```
@@ -110,6 +111,7 @@ LOCAL_PROXY_API_KEY=
 - `CLEANUP_MODE`: `chat`, `formal`, or `punctuation`.
 - `DEEPSEEK_API_KEY`: required only when `CLEANUP_PROVIDER=deepseek`.
 - `DEEPSEEK_BASE_URL`: defaults to `https://api.deepseek.com`.
+- `CLEANUP_HOLD_KEY`: optional Windows-only gate for cleanup. Example: `2` means cleanup runs only while the `2` key is held at request time.
 - `DEBUG_ENDPOINTS`: when `true`, debug endpoints are allowed beyond strict localhost-only access rules.
 - `LOCAL_PROXY_API_KEY`: optional local auth key. Leave empty to disable local auth.
 
@@ -124,6 +126,17 @@ Cleanup language behavior:
 - if `language` is provided, it is treated only as a hint for the cleanup model, not as a hard prompt switch
 
 This keeps the backend simpler and avoids separate Russian-only and English-only prompt branches.
+
+Optional hold-key gate:
+
+```env
+CLEANUP_HOLD_KEY=2
+```
+
+With that setting, the proxy skips cleanup unless the `2` key is physically held when the request reaches the backend. This is useful on Windows for push-to-talk workflows such as:
+
+- `Ctrl+1` -> raw transcript without cleanup
+- `Ctrl+1` while also holding `2` -> transcript with cleanup
 
 Enable cleanup:
 
@@ -222,7 +235,8 @@ Response:
   "cleanup_enabled": true,
   "cleanup_provider": "openrouter",
   "cleanup_model": "deepseek/deepseek-v4-flash",
-  "cleanup_mode": "chat"
+  "cleanup_mode": "chat",
+  "cleanup_hold_key": null
 }
 ```
 
