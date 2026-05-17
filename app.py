@@ -18,6 +18,11 @@ from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
 
+try:
+    from win11toast import notify as notify_windows_toast
+except ImportError:
+    notify_windows_toast = None
+
 load_dotenv()
 
 
@@ -260,22 +265,39 @@ def send_windows_cleanup_notification(active: bool) -> None:
     if not CLEANUP_WINDOWS_NOTIFICATIONS or os.name != "nt":
         return
 
+    title = "OpenRouter STT Proxy"
     body = "Cleanup enabled" if active else "Cleanup disabled"
+
+    if notify_windows_toast is not None:
+        try:
+            notify_windows_toast(title, body, audio={"silent": "true"})
+            return
+        except Exception as exc:
+            logger.warning("Failed to send Windows toast notification via win11toast: %s", exc)
+
+    escaped_title = title.replace("'", "''")
+    escaped_body = body.replace("'", "''")
     script = (
-        "[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] > $null; "
-        "[Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime] > $null; "
-        "$xml = New-Object Windows.Data.Xml.Dom.XmlDocument; "
-        f"$xml.LoadXml('<toast><visual><binding template=\"ToastGeneric\"><text>OpenRouter STT Proxy</text><text>{body}</text></binding></visual></toast>'); "
-        "$toast = [Windows.UI.Notifications.ToastNotification]::new($xml); "
-        "[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('OpenRouter STT Proxy').Show($toast)"
+        "Add-Type -AssemblyName System.Windows.Forms; "
+        "Add-Type -AssemblyName System.Drawing; "
+        "$notify = New-Object System.Windows.Forms.NotifyIcon; "
+        "$notify.Icon = [System.Drawing.SystemIcons]::Information; "
+        "$notify.Visible = $true; "
+        f"$notify.BalloonTipTitle = '{escaped_title}'; "
+        f"$notify.BalloonTipText = '{escaped_body}'; "
+        "$notify.BalloonTipIcon = [System.Windows.Forms.ToolTipIcon]::Info; "
+        "$notify.ShowBalloonTip(3000); "
+        "Start-Sleep -Seconds 4; "
+        "$notify.Dispose()"
     )
 
     try:
-        subprocess.run(
+        result = subprocess.run(
             [
                 "powershell.exe",
                 "-NoProfile",
                 "-NonInteractive",
+                "-STA",
                 "-WindowStyle",
                 "Hidden",
                 "-ExecutionPolicy",
@@ -287,6 +309,8 @@ def send_windows_cleanup_notification(active: bool) -> None:
             timeout=5,
             creationflags=CREATE_NO_WINDOW,
         )
+        if result.returncode not in {0, None}:
+            logger.warning("Windows cleanup notification process exited with code %s.", result.returncode)
     except Exception as exc:
         logger.warning("Failed to send Windows cleanup notification: %s", exc)
 
