@@ -99,7 +99,7 @@ OPENROUTER_TRANSCRIPTIONS_URL = "https://openrouter.ai/api/v1/audio/transcriptio
 OPENROUTER_CHAT_COMPLETIONS_URL = "https://openrouter.ai/api/v1/chat/completions"
 DEFAULT_DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 
-DEFAULT_STT_MODEL = get_optional_env("DEFAULT_MODEL") or "openai/whisper-large-v3"
+DEFAULT_STT_MODEL = get_optional_env("DEFAULT_MODEL") or "openai/gpt-4o-mini-transcribe"
 STT_TIMEOUT_SECONDS = get_env_float("OPENROUTER_TIMEOUT_SECONDS", 60.0)
 MAX_AUDIO_MB = get_env_int("MAX_AUDIO_MB", 25)
 MAX_AUDIO_BYTES = MAX_AUDIO_MB * 1024 * 1024

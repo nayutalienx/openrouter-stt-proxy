@@ -73,7 +73,7 @@ Edit `.env` and set your key:
 OPENROUTER_API_KEY=sk-or-...
 OPENROUTER_APP_NAME=OpenWhispr STT Proxy
 OPENROUTER_SITE_URL=http://localhost
-DEFAULT_MODEL=openai/whisper-large-v3
+DEFAULT_MODEL=openai/gpt-4o-mini-transcribe
 MAX_AUDIO_MB=25
 OPENROUTER_TIMEOUT_SECONDS=60
 CLEANUP_PROVIDER=openrouter
@@ -102,7 +102,7 @@ LOCAL_PROXY_API_KEY=
 - `OPENROUTER_API_KEY`: required. Your OpenRouter key.
 - `OPENROUTER_APP_NAME`: optional label sent as `X-Title`.
 - `OPENROUTER_SITE_URL`: optional site URL sent as `HTTP-Referer`.
-- `DEFAULT_MODEL`: default STT model. Defaults to `openai/whisper-large-v3`.
+- `DEFAULT_MODEL`: default STT model. Defaults to `openai/gpt-4o-mini-transcribe`.
 - `MAX_AUDIO_MB`: max accepted upload size in MB. Default is `25`.
 - `OPENROUTER_TIMEOUT_SECONDS`: upstream STT timeout. Default is `60`.
 - `CLEANUP_PROVIDER`: cleanup backend. Use `openrouter` or `deepseek`.
@@ -227,7 +227,7 @@ OpenWhispr:
 - `Speech-to-Text` -> `Cloud Providers` -> `Custom`
 - `Endpoint URL`: `http://127.0.0.1:8787/v1`
 - `API Key`: leave empty if `LOCAL_PROXY_API_KEY` is not set
-- `Model`: `openai/whisper-large-v3`
+- `Model`: `openai/gpt-4o-mini-transcribe`
 
 If you set `LOCAL_PROXY_API_KEY` in `.env`, then put that same value into the OpenWhispr `API Key` field. The proxy expects `Authorization: Bearer <LOCAL_PROXY_API_KEY>` for `/v1/audio/transcriptions` when local auth is enabled.
 
@@ -247,7 +247,7 @@ Response:
 {
   "status": "ok",
   "provider": "openrouter",
-  "default_stt_model": "openai/whisper-large-v3",
+  "default_stt_model": "openai/gpt-4o-mini-transcribe",
   "cleanup_enabled": true,
   "cleanup_active": false,
   "cleanup_provider": "openrouter",
@@ -267,7 +267,7 @@ Response:
   "object": "list",
   "data": [
     {
-      "id": "openai/whisper-large-v3",
+      "id": "openai/gpt-4o-mini-transcribe",
       "object": "model",
       "owned_by": "openrouter",
       "type": "speech-to-text"
@@ -287,7 +287,7 @@ Response:
 Accepted `multipart/form-data` fields:
 
 - `file` required
-- `model` optional, defaults to `openai/whisper-large-v3`
+- `model` optional, defaults to `openai/gpt-4o-mini-transcribe`
 - `language` optional
 - `prompt` optional
 - `temperature` optional
@@ -352,7 +352,7 @@ Response:
 ```bat
 curl -X POST http://127.0.0.1:8787/v1/audio/transcriptions ^
   -F "file=@test.wav" ^
-  -F "model=openai/whisper-large-v3"
+  -F "model=openai/gpt-4o-mini-transcribe"
 ```
 
 If local auth is enabled:
@@ -361,7 +361,7 @@ If local auth is enabled:
 curl -X POST http://127.0.0.1:8787/v1/audio/transcriptions ^
   -H "Authorization: Bearer YOUR_LOCAL_PROXY_API_KEY" ^
   -F "file=@test.wav" ^
-  -F "model=openai/whisper-large-v3"
+  -F "model=openai/gpt-4o-mini-transcribe"
 ```
 
 ## Notes about request forwarding
@@ -413,7 +413,7 @@ Cleanup:
 
 - Check that `OPENROUTER_API_KEY` in `.env` is correct.
 - Restart the proxy after editing `.env`.
-- Verify your OpenRouter account can access `openai/whisper-large-v3`.
+- Verify your OpenRouter account can access `openai/gpt-4o-mini-transcribe`.
 - If `CLEANUP_PROVIDER=openrouter`, verify OpenRouter can access your cleanup model too.
 - If `CLEANUP_PROVIDER=deepseek`, verify `DEEPSEEK_API_KEY` is correct and the model is available on your DeepSeek account.
 - If `LOCAL_PROXY_API_KEY` is set, make sure the local `Authorization: Bearer ...` header is also present.
