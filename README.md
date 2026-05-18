@@ -73,7 +73,7 @@ Edit `.env` and set your key:
 OPENROUTER_API_KEY=sk-or-...
 OPENROUTER_APP_NAME=OpenWhispr STT Proxy
 OPENROUTER_SITE_URL=http://localhost
-DEFAULT_MODEL=qwen/qwen3-asr-flash-2026-02-10
+DEFAULT_MODEL=openai/whisper-large-v3
 MAX_AUDIO_MB=25
 OPENROUTER_TIMEOUT_SECONDS=60
 CLEANUP_PROVIDER=openrouter
@@ -102,7 +102,7 @@ LOCAL_PROXY_API_KEY=
 - `OPENROUTER_API_KEY`: required. Your OpenRouter key.
 - `OPENROUTER_APP_NAME`: optional label sent as `X-Title`.
 - `OPENROUTER_SITE_URL`: optional site URL sent as `HTTP-Referer`.
-- `DEFAULT_MODEL`: default STT model. Defaults to `qwen/qwen3-asr-flash-2026-02-10`.
+- `DEFAULT_MODEL`: default STT model. Defaults to `openai/whisper-large-v3`.
 - `MAX_AUDIO_MB`: max accepted upload size in MB. Default is `25`.
 - `OPENROUTER_TIMEOUT_SECONDS`: upstream STT timeout. Default is `60`.
 - `CLEANUP_PROVIDER`: cleanup backend. Use `openrouter` or `deepseek`.
@@ -127,7 +127,7 @@ LOCAL_PROXY_API_KEY=
 
 ## Optional cleanup with DeepSeek V4 Flash
 
-The cleanup step improves punctuation, casing, grammar, and obvious ASR mistakes after Qwen STT produces the raw transcript. This is useful when you dictate into OpenWhispr and want readable chat-style text without changing the meaning.
+The cleanup step improves punctuation, casing, grammar, and obvious ASR mistakes after the STT model produces the raw transcript. This is useful when you dictate into OpenWhispr and want readable chat-style text without changing the meaning.
 
 Cleanup language behavior:
 
@@ -227,7 +227,7 @@ OpenWhispr:
 - `Speech-to-Text` -> `Cloud Providers` -> `Custom`
 - `Endpoint URL`: `http://127.0.0.1:8787/v1`
 - `API Key`: leave empty if `LOCAL_PROXY_API_KEY` is not set
-- `Model`: `qwen/qwen3-asr-flash-2026-02-10`
+- `Model`: `openai/whisper-large-v3`
 
 If you set `LOCAL_PROXY_API_KEY` in `.env`, then put that same value into the OpenWhispr `API Key` field. The proxy expects `Authorization: Bearer <LOCAL_PROXY_API_KEY>` for `/v1/audio/transcriptions` when local auth is enabled.
 
@@ -247,7 +247,7 @@ Response:
 {
   "status": "ok",
   "provider": "openrouter",
-  "default_stt_model": "qwen/qwen3-asr-flash-2026-02-10",
+  "default_stt_model": "openai/whisper-large-v3",
   "cleanup_enabled": true,
   "cleanup_active": false,
   "cleanup_provider": "openrouter",
@@ -267,7 +267,7 @@ Response:
   "object": "list",
   "data": [
     {
-      "id": "qwen/qwen3-asr-flash-2026-02-10",
+      "id": "openai/whisper-large-v3",
       "object": "model",
       "owned_by": "openrouter",
       "type": "speech-to-text"
@@ -287,7 +287,7 @@ Response:
 Accepted `multipart/form-data` fields:
 
 - `file` required
-- `model` optional, defaults to `qwen/qwen3-asr-flash-2026-02-10`
+- `model` optional, defaults to `openai/whisper-large-v3`
 - `language` optional
 - `prompt` optional
 - `temperature` optional
@@ -352,7 +352,7 @@ Response:
 ```bat
 curl -X POST http://127.0.0.1:8787/v1/audio/transcriptions ^
   -F "file=@test.wav" ^
-  -F "model=qwen/qwen3-asr-flash-2026-02-10"
+  -F "model=openai/whisper-large-v3"
 ```
 
 If local auth is enabled:
@@ -361,7 +361,7 @@ If local auth is enabled:
 curl -X POST http://127.0.0.1:8787/v1/audio/transcriptions ^
   -H "Authorization: Bearer YOUR_LOCAL_PROXY_API_KEY" ^
   -F "file=@test.wav" ^
-  -F "model=qwen/qwen3-asr-flash-2026-02-10"
+  -F "model=openai/whisper-large-v3"
 ```
 
 ## Notes about request forwarding
@@ -370,7 +370,7 @@ curl -X POST http://127.0.0.1:8787/v1/audio/transcriptions ^
 - The proxy does not log base64 audio or API keys.
 - The proxy does not log the full user transcript.
 - `language` and `temperature` are forwarded to STT when provided.
-- `prompt` is forwarded only when non-empty and is sent as a Qwen provider-specific option.
+- `prompt` is forwarded only for compatible Qwen-based STT models. It is ignored for the default Whisper path.
 - STT uses `OPENROUTER_API_KEY`.
 - Cleanup uses `OPENROUTER_API_KEY` when `CLEANUP_PROVIDER=openrouter`.
 - Cleanup uses `DEEPSEEK_API_KEY` when `CLEANUP_PROVIDER=deepseek`.
@@ -413,7 +413,7 @@ Cleanup:
 
 - Check that `OPENROUTER_API_KEY` in `.env` is correct.
 - Restart the proxy after editing `.env`.
-- Verify your OpenRouter account can access `qwen/qwen3-asr-flash-2026-02-10`.
+- Verify your OpenRouter account can access `openai/whisper-large-v3`.
 - If `CLEANUP_PROVIDER=openrouter`, verify OpenRouter can access your cleanup model too.
 - If `CLEANUP_PROVIDER=deepseek`, verify `DEEPSEEK_API_KEY` is correct and the model is available on your DeepSeek account.
 - If `LOCAL_PROXY_API_KEY` is set, make sure the local `Authorization: Bearer ...` header is also present.
